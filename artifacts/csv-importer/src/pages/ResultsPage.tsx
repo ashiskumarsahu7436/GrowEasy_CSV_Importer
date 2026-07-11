@@ -149,7 +149,7 @@ export default function ResultsPage() {
           </div>
           <h2 className="text-lg font-semibold mb-1">Processing your rows…</h2>
           <p className="text-sm text-muted-foreground">
-            Gemini is normalizing {parsedData.totalRows.toLocaleString()} row{parsedData.totalRows === 1 ? '' : 's'} in batches of 25 and validating each record.
+            AI is normalizing {parsedData.totalRows.toLocaleString()} row{parsedData.totalRows === 1 ? '' : 's'} in batches of 25 and validating each record.
           </p>
         </div>
       )}

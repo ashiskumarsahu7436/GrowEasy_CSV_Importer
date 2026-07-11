@@ -1,4 +1,3 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { logger } from "./logger";
 
 const CRM_FIELDS = [
@@ -36,7 +35,7 @@ const DATA_SOURCE_VALUES = [
   "sarjapur_plots",
 ] as const;
 
-export interface GeminiColumnMapping {
+export interface AiColumnMapping {
   csvColumn: string;
   crmField: CrmField | null;
   confidence: number;
@@ -48,26 +47,27 @@ export type RawCrmRecord = Partial<Record<CrmField, string | null>>;
 /** A normalized CRM record — same shape, values cleaned up (phone split, enum coercion, ISO dates). */
 export type NormalizedCrmRecord = Partial<Record<CrmField, string | null>>;
 
-let cachedClient: GoogleGenerativeAI | null = null;
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
-/** Lazily builds the Gemini client. Throws a clear error if the API key is missing. */
-function getClient(): GoogleGenerativeAI {
-  const apiKey = process.env["GEMINI_API_KEY"];
+/** Tried in order: the primary model first, then this fallback if the primary is exhausted/unavailable. */
+const PRIMARY_MODEL = "llama-3.3-70b-versatile";
+const FALLBACK_MODEL = "qwen/qwen3-32b";
+
+function getApiKey(): string {
+  const apiKey = process.env["GROQ_API_KEY"];
   if (!apiKey) {
     throw new Error(
-      "GEMINI_API_KEY environment variable is not set. Add it as a secret (Replit) or environment variable (Render) to enable AI-powered CSV import.",
+      "GROQ_API_KEY environment variable is not set. Add it as a secret (Replit) or environment variable (Render) to enable AI-powered CSV import.",
     );
   }
-  if (!cachedClient) {
-    cachedClient = new GoogleGenerativeAI(apiKey);
-  }
-  return cachedClient;
+  return apiKey;
 }
 
-/** Strips markdown code fences some models wrap JSON responses in. */
+/** Strips markdown code fences and <think>...</think> blocks some models wrap responses in. */
 function extractJson(text: string): string {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  return (fenced ? fenced[1] : text).trim();
+  const withoutThink = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  const fenced = withoutThink.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  return (fenced ? fenced[1] : withoutThink).trim();
 }
 
 const MAX_RETRY_ATTEMPTS = 3;
@@ -86,22 +86,48 @@ function isRetryableError(err: unknown): boolean {
 }
 
 /**
- * Retries a Gemini call up to MAX_RETRY_ATTEMPTS times with exponential
- * backoff, but only for transient-looking errors (rate limits, timeouts,
- * 5xx). Non-retryable errors (bad JSON, invalid key) fail immediately.
+ * Calls a single Groq chat completion, retrying up to MAX_RETRY_ATTEMPTS
+ * times with exponential backoff for transient-looking errors only.
  */
-async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+async function callModel(model: string, prompt: string): Promise<string> {
+  const apiKey = getApiKey();
   let lastErr: unknown;
+
   for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
     try {
-      return await fn();
+      const response = await fetch(GROQ_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0,
+        }),
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Groq API error (${response.status}) for model ${model}: ${body}`);
+      }
+
+      const json = (await response.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+      const text = json.choices?.[0]?.message?.content;
+      if (typeof text !== "string" || text.trim() === "") {
+        throw new Error(`Groq model ${model} returned an empty response.`);
+      }
+      return text;
     } catch (err) {
       lastErr = err;
       if (attempt === MAX_RETRY_ATTEMPTS || !isRetryableError(err)) throw err;
       const delay = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
       logger.warn(
-        { err, attempt, delay, label },
-        "Gemini call failed with a transient error — retrying",
+        { err, attempt, delay, model },
+        "Groq call failed with a transient error — retrying",
       );
       await sleep(delay);
     }
@@ -110,20 +136,35 @@ async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Ask Gemini to normalize a batch of directly-mapped CRM records: split
+ * Calls the primary Groq model, falling back to the secondary model if the
+ * primary is exhausted (retries used up) or fails outright. The fallback
+ * itself is also retried on transient errors. Throws the fallback's error
+ * if both models fail.
+ */
+async function callWithFallback(label: string, prompt: string): Promise<string> {
+  try {
+    return await callModel(PRIMARY_MODEL, prompt);
+  } catch (err) {
+    logger.warn(
+      { err, label, primary: PRIMARY_MODEL, fallback: FALLBACK_MODEL },
+      "Primary Groq model failed — falling back to secondary model",
+    );
+    return await callModel(FALLBACK_MODEL, prompt);
+  }
+}
+
+/**
+ * Ask the AI to normalize a batch of directly-mapped CRM records: split
  * combined phone numbers into country_code / mobile_without_country_code,
  * coerce free-text status/data-source values into the fixed enums (or null
  * if no reasonable match), and parse dates into ISO 8601 where possible.
- * Returns records in the same order/length as the input — if Gemini omits
- * or mangles an entry, the caller's raw record is used as a fallback.
+ * Returns records in the same order/length as the input — if the model
+ * omits or mangles an entry, the caller's raw record is used as a fallback.
  */
 export async function normalizeCrmBatch(
   records: RawCrmRecord[],
 ): Promise<NormalizedCrmRecord[]> {
   if (records.length === 0) return [];
-
-  const client = getClient();
-  const model = client.getGenerativeModel({ model: "gemini-2.0-flash" });
 
   const prompt = `You are cleaning up CRM lead records that were directly mapped from a CSV import. Normalize each record in place — do not invent data that isn't present.
 
@@ -138,23 +179,22 @@ Rules:
 Input records (JSON array, index order matters):
 ${JSON.stringify(records)}
 
-Respond with ONLY a JSON array of the same length, no prose, no markdown fences, one normalized record per input record in the same order.`;
+Respond with ONLY a JSON array of the same length, no prose, no markdown fences, no <think> blocks, one normalized record per input record in the same order.`;
 
-  const result = await withRetry("normalizeCrmBatch", () => model.generateContent(prompt));
-  const raw = result.response.text();
+  const raw = await callWithFallback("normalizeCrmBatch", prompt);
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(extractJson(raw));
   } catch (err) {
-    logger.error({ err, raw }, "Failed to parse Gemini CRM normalization response");
+    logger.error({ err, raw }, "Failed to parse AI CRM normalization response");
     throw new Error("AI returned a response that could not be parsed as JSON.");
   }
 
   if (!Array.isArray(parsed) || parsed.length !== records.length) {
     logger.warn(
       { expected: records.length, got: Array.isArray(parsed) ? parsed.length : typeof parsed },
-      "Gemini normalization response length mismatch — falling back to raw records",
+      "AI normalization response length mismatch — falling back to raw records",
     );
     return records;
   }
@@ -188,17 +228,14 @@ Respond with ONLY a JSON array of the same length, no prose, no markdown fences,
 }
 
 /**
- * Ask Gemini to suggest CRM field mappings for each CSV column, using a
+ * Ask the AI to suggest CRM field mappings for each CSV column, using a
  * handful of sample rows as context. Falls back to `null`/0-confidence
- * mappings for any column Gemini fails to address, rather than dropping it.
+ * mappings for any column the model fails to address, rather than dropping it.
  */
 export async function suggestColumnMappings(
   headers: string[],
   sampleRows: Record<string, string>[],
-): Promise<GeminiColumnMapping[]> {
-  const client = getClient();
-  const model = client.getGenerativeModel({ model: "gemini-2.0-flash" });
-
+): Promise<AiColumnMapping[]> {
   const prompt = `You are mapping columns from an uploaded CSV file to a fixed set of CRM fields.
 
 CRM fields available (use these exact keys, or null if no good match exists):
@@ -210,18 +247,17 @@ Sample rows (up to 5) for context:
 ${JSON.stringify(sampleRows.slice(0, 5), null, 2)}
 
 For each CSV column, return the single best-matching CRM field (or null if none fits well) and a confidence score from 0 to 100.
-Respond with ONLY a JSON array, no prose, no markdown fences, in this exact shape:
+Respond with ONLY a JSON array, no prose, no markdown fences, no <think> blocks, in this exact shape:
 [{"csvColumn": "<original column name>", "crmField": "<crm_field_key_or_null>", "confidence": <0-100>}]
 Every CSV column must appear exactly once in the array.`;
 
-  const result = await withRetry("suggestColumnMappings", () => model.generateContent(prompt));
-  const raw = result.response.text();
+  const raw = await callWithFallback("suggestColumnMappings", prompt);
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(extractJson(raw));
   } catch (err) {
-    logger.error({ err, raw }, "Failed to parse Gemini column mapping response");
+    logger.error({ err, raw }, "Failed to parse AI column mapping response");
     throw new Error("AI returned a response that could not be parsed as JSON.");
   }
 
@@ -230,7 +266,7 @@ Every CSV column must appear exactly once in the array.`;
   }
 
   const validFields = new Set<string>(CRM_FIELDS);
-  const byColumn = new Map<string, GeminiColumnMapping>();
+  const byColumn = new Map<string, AiColumnMapping>();
 
   for (const item of parsed) {
     if (
