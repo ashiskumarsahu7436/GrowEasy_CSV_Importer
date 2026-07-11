@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "GrowEasy CSV Importer"
+version = "1.0.0"
+id = "artifacts/csv-importer"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20541
+
+[services.development]
+run = "pnpm --filter @workspace/csv-importer run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/csv-importer", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/csv-importer/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20541"
+BASE_PATH = "/"
