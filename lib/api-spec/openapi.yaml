@@ -1,0 +1,235 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: GrowEasy AI CSV Importer API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: csv
+    description: CSV import and AI processing
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /csv/map-columns:
+    post:
+      operationId: mapColumns
+      tags: [csv]
+      summary: AI column mapping
+      description: Use AI to suggest CRM field mappings for CSV columns
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ColumnMapInput"
+      responses:
+        "200":
+          description: AI column mappings with confidence scores
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ColumnMapResult"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: AI or server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /csv/process:
+    post:
+      operationId: processCsv
+      tags: [csv]
+      summary: Process CSV rows into CRM records
+      description: AI extracts and normalizes CRM fields from raw CSV rows
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CsvProcessInput"
+      responses:
+        "200":
+          description: Processed CRM records with status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CsvProcessResult"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: AI or server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    CrmRecord:
+      type: object
+      properties:
+        created_at:
+          type: ["string", "null"]
+        name:
+          type: ["string", "null"]
+        email:
+          type: ["string", "null"]
+        country_code:
+          type: ["string", "null"]
+        mobile_without_country_code:
+          type: ["string", "null"]
+        company:
+          type: ["string", "null"]
+        city:
+          type: ["string", "null"]
+        state:
+          type: ["string", "null"]
+        country:
+          type: ["string", "null"]
+        lead_owner:
+          type: ["string", "null"]
+        crm_status:
+          type: ["string", "null"]
+        crm_note:
+          type: ["string", "null"]
+        data_source:
+          type: ["string", "null"]
+        possession_time:
+          type: ["string", "null"]
+        description:
+          type: ["string", "null"]
+
+    ProcessedRecord:
+      type: object
+      required: [rowIndex, status, crm]
+      properties:
+        rowIndex:
+          type: integer
+        status:
+          type: string
+          enum: [imported, skipped, failed]
+        reason:
+          type: ["string", "null"]
+        crm:
+          $ref: "#/components/schemas/CrmRecord"
+
+    ColumnMapping:
+      type: object
+      required: [csvColumn, confidence]
+      properties:
+        csvColumn:
+          type: string
+        crmField:
+          type: ["string", "null"]
+        confidence:
+          type: number
+
+    ColumnMapInput:
+      type: object
+      required: [headers, sampleRows]
+      properties:
+        headers:
+          type: array
+          items:
+            type: string
+        sampleRows:
+          type: array
+          items:
+            type: object
+            additionalProperties:
+              type: string
+
+    ColumnMapResult:
+      type: object
+      required: [mappings]
+      properties:
+        mappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ColumnMapping"
+
+    CsvProcessStats:
+      type: object
+      required: [imported, skipped, failed, total]
+      properties:
+        imported:
+          type: integer
+        skipped:
+          type: integer
+        failed:
+          type: integer
+        total:
+          type: integer
+
+    CsvProcessInput:
+      type: object
+      required: [headers, rows]
+      properties:
+        headers:
+          type: array
+          items:
+            type: string
+        rows:
+          type: array
+          items:
+            type: object
+            additionalProperties:
+              type: string
+        userMappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ColumnMapping"
+
+    CsvProcessResult:
+      type: object
+      required: [records, stats]
+      properties:
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessedRecord"
+        stats:
+          $ref: "#/components/schemas/CsvProcessStats"
