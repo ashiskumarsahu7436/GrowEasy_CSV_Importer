@@ -163,7 +163,7 @@ export default function MappingPage() {
           </div>
           <h2 className="text-lg font-semibold mb-1">Analysing your columns…</h2>
           <p className="text-sm text-muted-foreground">
-            Gemini is comparing your {headers.length} column{headers.length === 1 ? '' : 's'} against 15 CRM fields.
+            AI is comparing your {headers.length} column{headers.length === 1 ? '' : 's'} against 15 CRM fields.
           </p>
         </div>
       )}

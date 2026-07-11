@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { MapColumnsBody, MapColumnsResponse, ProcessCsvBody, ProcessCsvResponse } from "@workspace/api-zod";
 import type { ErrorResponse } from "@workspace/api-zod";
-import { suggestColumnMappings, normalizeCrmBatch, type CrmField, type RawCrmRecord } from "../lib/gemini";
+import { suggestColumnMappings, normalizeCrmBatch, type CrmField, type RawCrmRecord } from "../lib/groq";
 import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
@@ -41,8 +41,66 @@ router.post("/csv/map-columns", async (req, res) => {
   }
 });
 
-/** Fields that let us recognize/reach a lead — a record with none of these is unusable. */
-const IDENTIFYING_FIELDS: CrmField[] = ["name", "email", "mobile_without_country_code"];
+/**
+ * Fields that let us reach a lead — a record with neither is unusable and must be
+ * skipped, per spec ("if a record contains neither email nor mobile number, skip
+ * that record"). Name alone does not count as identifying.
+ */
+const IDENTIFYING_FIELDS: CrmField[] = ["email", "mobile_without_country_code"];
+
+const EMAIL_REGEX = /[^\s,;<>()]+@[^\s,;<>()]+\.[^\s,;<>()]+/g;
+
+/** Splits a cell that may contain multiple emails into a primary + extras, deduped and order-preserved. */
+function splitMultipleEmails(value: string): { primary: string; extras: string[] } {
+  const matches = value.match(EMAIL_REGEX);
+  if (!matches || matches.length === 0) return { primary: value.trim(), extras: [] };
+  const unique = [...new Set(matches.map((m) => m.trim()))];
+  return { primary: unique[0]!, extras: unique.slice(1) };
+}
+
+/** Splits a cell that may contain multiple phone numbers (comma/slash/semicolon/"or"/"and"-separated). */
+function splitMultiplePhones(value: string): { primary: string; extras: string[] } {
+  const parts = value
+    .split(/[,;/]+|\s+(?:or|and)\s+/i)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  if (parts.length <= 1) return { primary: value.trim(), extras: [] };
+  const unique = [...new Set(parts)];
+  return { primary: unique[0]!, extras: unique.slice(1) };
+}
+
+function appendToNote(note: string | null | undefined, addition: string): string {
+  const trimmed = note?.trim();
+  return trimmed ? `${trimmed}\n${addition}` : addition;
+}
+
+/**
+ * Per spec: multiple emails or mobile numbers on one record must not be dropped —
+ * keep the first as the canonical value and append the rest into crm_note. Runs
+ * before AI normalization so crm_note already carries the overflow the AI is
+ * instructed to leave untouched.
+ */
+function foldExtraContactsIntoNote(record: RawCrmRecord): RawCrmRecord {
+  const result: RawCrmRecord = { ...record };
+
+  if (result.email && result.email.trim() !== "") {
+    const { primary, extras } = splitMultipleEmails(result.email);
+    if (extras.length > 0) {
+      result.email = primary;
+      result.crm_note = appendToNote(result.crm_note, `Additional email(s): ${extras.join(", ")}`);
+    }
+  }
+
+  if (result.mobile_without_country_code && result.mobile_without_country_code.trim() !== "") {
+    const { primary, extras } = splitMultiplePhones(result.mobile_without_country_code);
+    if (extras.length > 0) {
+      result.mobile_without_country_code = primary;
+      result.crm_note = appendToNote(result.crm_note, `Additional phone(s): ${extras.join(", ")}`);
+    }
+  }
+
+  return result;
+}
 
 router.post("/csv/process", async (req, res) => {
   const parsed = ProcessCsvBody.safeParse(req.body);
@@ -72,10 +130,10 @@ router.post("/csv/process", async (req, res) => {
       const value = row[csvColumn];
       record[crmField] = value && value.trim() !== "" ? value.trim() : null;
     }
-    return record;
+    return foldExtraContactsIntoNote(record);
   });
 
-  // Normalize in batches of BATCH_SIZE. Gemini is required — if the key is
+  // Normalize in batches of BATCH_SIZE. AI normalization is required — if the key is
   // missing or the very first batch fails, surface a clear top-level error
   // (consistent with /csv/map-columns). A failure on a later batch instead
   // falls back to the raw, un-normalized values for just that batch so one

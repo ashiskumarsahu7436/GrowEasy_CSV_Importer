@@ -8,7 +8,10 @@ import {
 import { StepIndicator } from '@/components/StepIndicator';
 import { useImport } from '@/context/ImportContext';
 import { useDarkMode } from '@/hooks/useDarkMode';
-import { parseCsv, formatFileSize, downloadSampleCsv } from '@/utils/csvUtils';
+import { parseCsv, formatFileSize, downloadSampleCsv, SAMPLE_CSVS } from '@/utils/csvUtils';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from '@/components/ui/dialog';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 type UploadError = 'invalid_type' | 'too_large' | 'duplicate' | null;
@@ -23,6 +26,7 @@ export default function UploadPage() {
   const [isParsing, setIsParsing]         = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [isDragActive, setIsDragActive]   = useState(false);
+  const [sampleDialogOpen, setSampleDialogOpen] = useState(false);
 
   // ── Validate + store file ────────────────────────────────────────────────
   const validateAndSetFile = useCallback((newFile: File) => {
@@ -256,7 +260,7 @@ export default function UploadPage() {
               </p>
             </div>
             <button
-              onClick={(e) => { e.stopPropagation(); downloadSampleCsv(); }}
+              onClick={(e) => { e.stopPropagation(); setSampleDialogOpen(true); }}
               className="min-h-11 px-4 py-3 rounded-xl border border-border bg-card text-sm font-medium shadow-sm hover:bg-muted hover:-translate-y-0.5 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-ring flex items-center gap-2 self-start"
             >
               <Download className="w-4 h-4" />
@@ -279,6 +283,34 @@ export default function UploadPage() {
           </div>
         </div>
       </div>
+
+      {/* ── Sample CSV picker ── */}
+      <Dialog open={sampleDialogOpen} onOpenChange={setSampleDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Download a sample CSV</DialogTitle>
+            <DialogDescription>
+              Three samples, different sizes and shapes, so you can see how the importer handles clean data, messy real-world exports, and large files.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            {SAMPLE_CSVS.map((sample) => (
+              <button
+                key={sample.id}
+                onClick={() => { downloadSampleCsv(sample.id); setSampleDialogOpen(false); }}
+                className="text-left rounded-xl border border-border bg-card p-4 shadow-sm hover:bg-muted hover:-translate-y-0.5 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-ring flex items-start justify-between gap-3"
+              >
+                <div>
+                  <p className="text-sm font-semibold">{sample.label}</p>
+                  <p className="text-sm text-muted-foreground mt-1">{sample.description}</p>
+                  <p className="text-xs text-muted-foreground mt-2">{sample.meta}</p>
+                </div>
+                <Download className="w-4 h-4 shrink-0 mt-1" />
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Status bar ── */}
       <div className="mt-5 flex items-center gap-4 flex-wrap">
