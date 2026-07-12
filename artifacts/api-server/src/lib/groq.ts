@@ -71,7 +71,11 @@ function extractJson(text: string): string {
 }
 
 const MAX_RETRY_ATTEMPTS = 3;
+/** Base delay for generic transient errors (5xx, timeouts). */
 const RETRY_BASE_DELAY_MS = 500;
+/** Base delay when the API explicitly rate-limits us (429). Needs to be long
+ *  enough for the per-minute token/request window to partially recover. */
+const RATE_LIMIT_RETRY_BASE_DELAY_MS = 3000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -124,10 +128,14 @@ async function callModel(model: string, prompt: string): Promise<string> {
     } catch (err) {
       lastErr = err;
       if (attempt === MAX_RETRY_ATTEMPTS || !isRetryableError(err)) throw err;
-      const delay = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+      const isRateLimit = /429|rate.?limit/i.test(
+        err instanceof Error ? err.message : String(err),
+      );
+      const baseDelay = isRateLimit ? RATE_LIMIT_RETRY_BASE_DELAY_MS : RETRY_BASE_DELAY_MS;
+      const delay = baseDelay * 2 ** (attempt - 1);
       logger.warn(
-        { err, attempt, delay, model },
-        "Groq call failed with a transient error — retrying",
+        { err, attempt, delay, model, isRateLimit },
+        "Groq call failed — retrying with backoff",
       );
       await sleep(delay);
     }
@@ -149,6 +157,11 @@ async function callWithFallback(label: string, prompt: string): Promise<string> 
       { err, label, primary: PRIMARY_MODEL, fallback: FALLBACK_MODEL },
       "Primary Groq model failed — falling back to secondary model",
     );
+    // Both models share the same API-key quota. Hammering the fallback
+    // immediately after a rate-limit on the primary just doubles the burst,
+    // which is exactly what causes the cascade of 429s seen in the logs.
+    // A short pause lets the per-minute window partially recover first.
+    if (isRetryableError(err)) await sleep(1000);
     return await callModel(FALLBACK_MODEL, prompt);
   }
 }
