@@ -7,6 +7,12 @@ import { logger } from "../lib/logger";
 const router: IRouter = Router();
 
 const BATCH_SIZE = 25;
+/** Pause between consecutive Groq batches to avoid token-rate-limit bursts. */
+const INTER_BATCH_DELAY_MS = 1500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -162,6 +168,11 @@ router.post("/csv/process", async (req, res) => {
       }
     }
     offset += batch.length;
+    // Pause between batches so we don't burst through Groq's per-minute
+    // token/request limits. Skip the delay after the final batch.
+    if (batchIndex < batches.length - 1) {
+      await sleep(INTER_BATCH_DELAY_MS);
+    }
   }
 
   const records = normalizedRecords.map((crm, rowIndex) => {

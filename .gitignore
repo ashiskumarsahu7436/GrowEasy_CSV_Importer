@@ -44,6 +44,13 @@ Thumbs.db
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
 
-# Replit
+# Replit-internal (never commit these)
 .cache/
 .local/
+.agents/
+.canvas/
+.replit
+.replitignore
+replit.nix
+scripts/
+attached_assets/
